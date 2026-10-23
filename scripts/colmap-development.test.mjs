@@ -212,6 +212,16 @@ test("Linux preflight reports missing tools, checks build tools and delegates CU
   const missing = run({ missing: "patchelf" });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /Missing build prerequisite: patchelf/);
+  // The CPU-only switch drops the CUDA prerequisites and the CI toolchain pin, so a
+  // distribution CMake/Ninja can build a CUDA-less runtime instead of failing.
+  const cpu = spawnSync(process.env.OOOSPLAT_TEST_BASH || "bash", ["-c", script], {
+    encoding: "utf8", windowsHide: true,
+    env: { ...process.env, OOOSPLAT_COLMAP_CPU: "1", CUDA_PATH: root.replaceAll("\\", "/"), MOCK_WORKSPACE: workspace.replaceAll("\\", "/"), MOCK_CMAKE_VERSION: "4.4.4", MOCK_NINJA_VERSION: "1.13.2" },
+  });
+  assert.equal(cpu.status, 0, cpu.error?.message || cpu.stderr);
+  assert.match(cpu.stdout, /CPU-only build/);
+  assert.match(cpu.stdout, /PRECHECK_PASSED/);
+  assert.doesNotMatch(cpu.stdout, /CUDA_SHARED_CHECK_CALLED/);
 });
 
 test("macOS mixed runtime no longer compiles COLMAP while the manual COLMAP-only builder remains", () => {

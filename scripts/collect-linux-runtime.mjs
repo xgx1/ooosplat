@@ -38,7 +38,7 @@ export function linuxLddDependency(line) {
 // are external. This is not a generic /usr/lib exclusion.
 const hostLibrary = /^(?:ld-linux-x86-64|lib(?:c|m|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+))\.so(?:\.|$)|^(?:libcuda\.so|libnvidia-)/;
 
-export function collectLinuxRuntime(stage, installed, cuda, { execute = spawnSync } = {}) {
+export function collectLinuxRuntime(stage, installed, cuda = installed, { execute = spawnSync } = {}) {
   [stage, installed, cuda] = [stage, installed, cuda].map(p => path.resolve(p));
   const origins = [];
   const queue = [path.join(stage, "bin/colmap"), ...filesUnder(path.join(stage, "lib")).filter(isLinuxRuntimeElf)];
@@ -65,6 +65,6 @@ export function collectLinuxRuntime(stage, installed, cuda, { execute = spawnSyn
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length !== 5) throw new Error("Usage: node scripts/collect-linux-runtime.mjs <stage> <installed> <cuda-root>");
+  if (process.argv.length !== 5 && process.argv.length !== 4) throw new Error("Usage: node scripts/collect-linux-runtime.mjs <stage> <installed> [cuda-root]");
   collectLinuxRuntime(...process.argv.slice(2));
 }

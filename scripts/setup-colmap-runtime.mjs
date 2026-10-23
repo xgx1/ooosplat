@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { workspace, assertHashPin, fileHash, runtimeLock, verifyColmap } from "./colmap-runtime.mjs";
+import { workspace, assertHashPin, cpuOnlyAllowed, fileHash, runtimeLock, verifyColmap } from "./colmap-runtime.mjs";
 
 export function archiveEntriesSafe(listing) {
   const entries = listing.split(/\r?\n/).filter(Boolean);
@@ -75,6 +75,17 @@ export function installColmapRuntime(platform, { localArchive = process.env.OOOS
     console.log(`Ready: locked COLMAP ${runtimeLock.releaseTag} runtime`);
     return destination;
   } catch { /* Install the reviewed archive; never use PATH or a stale runtime. */ }
+  if (cpuOnlyAllowed()) {
+    // No CPU-only release is published, so a local build is the only AMD source.
+    // Its own SHA256SUMS is the pin; the inventory still covers every runtime file.
+    try {
+      verifyColmap(destination, platform, undefined);
+    } catch (error) {
+      throw new Error(`OOOSPLAT_COLMAP_CPU=1 needs a CPU-only runtime in ${expected.destination}: ${error.message}. Build one with 'OOOSPLAT_COLMAP_CPU=1 bash scripts/build-colmap-linux.sh'.`);
+    }
+    console.log(`Ready: local CPU-only COLMAP runtime in ${expected.destination}`);
+    return destination;
+  }
 
   const cache = path.join(workspace, ".cache", "engines", "colmap", platform);
   fs.mkdirSync(cache, { recursive: true });

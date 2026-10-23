@@ -4,7 +4,24 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { archiveEntriesSafe, commitColmapRuntime, normalizeMacosRuntimePermissions } from "./setup-colmap-runtime.mjs";
-import { assertHashPin, fileHash, filesUnder, isLockedColmapHelp, runtimeLock, verifyIntegrity, verifyColmap } from "./colmap-runtime.mjs";
+import { assertHashPin, cudaRequired, fileHash, filesUnder, isLockedColmapHelp, runtimeLock, verifyIntegrity, verifyColmap } from "./colmap-runtime.mjs";
+
+function withCpuMode(enabled, run) {
+  const previous = process.env.OOOSPLAT_COLMAP_CPU;
+  if (enabled) process.env.OOOSPLAT_COLMAP_CPU = "1";
+  else delete process.env.OOOSPLAT_COLMAP_CPU;
+  try { return run(); } finally {
+    if (previous === undefined) delete process.env.OOOSPLAT_COLMAP_CPU;
+    else process.env.OOOSPLAT_COLMAP_CPU = previous;
+  }
+}
+function cpuOnlyFixture(t) {
+  const fixture = releaseFixture(t, "linux");
+  Object.assign(fixture.info.features, { CUDA_ENABLED: false, CASPAR_ENABLED: false });
+  fixture.info.cudaRelease = null;
+  fixture.info.gpuArchitectures = [];
+  return fixture;
+}
 
 function releaseFixture(t, platform = "linux") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ooosplat-colmap-release-test-"));
@@ -94,6 +111,30 @@ test("new Release metadata validates for all three platform policies", t => {
     const fixture = releaseFixture(t, platform);
     assert.doesNotThrow(() => verifyColmap(fixture.root, platform, fixture.reseal(), { run: false, requireRelease: true, releaseLock: fixture.lock }));
   }
+});
+
+test("a CPU-only COLMAP build validates only behind the explicit CPU switch", t => {
+  assert.equal(withCpuMode(false, () => cudaRequired("linux")), true);
+  assert.equal(withCpuMode(true, () => cudaRequired("linux")), false);
+  assert.equal(withCpuMode(false, () => cudaRequired("macos")), false);
+  const fixture = cpuOnlyFixture(t), pin = fixture.reseal();
+  const verify = () => verifyColmap(fixture.root, "linux", pin, { run: false, requireRelease: true, releaseLock: fixture.lock });
+  assert.throws(() => withCpuMode(false, verify), /no CUDA support/);
+  assert.doesNotThrow(() => withCpuMode(true, verify));
+  // The switch relaxes the requirement, so the pinned CUDA release keeps validating.
+  assert.doesNotThrow(() => withCpuMode(true, () => {
+    const cuda = releaseFixture(t, "linux");
+    return verifyColmap(cuda.root, "linux", cuda.reseal(), { run: false, requireRelease: true, releaseLock: cuda.lock });
+  }));
+});
+
+test("a local CPU-only runtime falls back to its own inventory pin", t => {
+  const fixture = cpuOnlyFixture(t), pin = fixture.reseal();
+  assert.throws(() => withCpuMode(false, () => verifyColmap(fixture.root, "linux", "", { run: false, requireRelease: true, releaseLock: fixture.lock })), /integrity pin is required/);
+  assert.doesNotThrow(() => withCpuMode(true, () => verifyColmap(fixture.root, "linux", "", { run: false, requireRelease: true, releaseLock: fixture.lock })));
+  fixture.write("lib/runtime.so.1", "tampered");
+  assert.throws(() => withCpuMode(true, () => verifyColmap(fixture.root, "linux", "", { run: false })), /hash mismatch/);
+  assert.ok(pin);
 });
 
 test("identity, feature, platform and vocabulary drift are rejected", t => {

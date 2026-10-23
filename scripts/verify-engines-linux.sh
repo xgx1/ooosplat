@@ -19,8 +19,13 @@ fi
 node "$workspace/scripts/brush-runtime.mjs" verify linux
 
 colmap="$workspace/engines/linux/colmap/bin/colmap"
-pin="$(node -p 'require(process.argv[1]).colmap.integritySha256' "$workspace/engines/manifest.linux.json")"
-node "$workspace/scripts/colmap-runtime.mjs" "$workspace/engines/linux/colmap" linux "$pin" release
+if [[ "${OOOSPLAT_COLMAP_CPU:-0}" == 1 ]]; then
+  # CPU-only builds are not published releases, so the runtime's own inventory is the pin.
+  node "$workspace/scripts/colmap-runtime.mjs" "$workspace/engines/linux/colmap" linux ""
+else
+  pin="$(node -p 'require(process.argv[1]).colmap.integritySha256' "$workspace/engines/manifest.linux.json")"
+  node "$workspace/scripts/colmap-runtime.mjs" "$workspace/engines/linux/colmap" linux "$pin" release
+fi
 feature_help="$("$colmap" feature_extractor -h 2>&1)"
 matching_help="$("$colmap" sequential_matcher -h 2>&1)"
 "$colmap" mapper -h >/dev/null 2>&1
@@ -38,4 +43,8 @@ for flag in --total-train-iters --max-resolution --export-every --export-path --
   grep -q -- "$flag" <<<"$brush_help" || { echo "Brush is missing $flag" >&2; exit 1; }
 done
 
-echo "Verified system FFmpeg/FFprobe, pinned bundled COLMAP 4.2.1 (Caspar + Ceres), and OOOBrush ooo-v1.0.0 CLI."
+if [[ "${OOOSPLAT_COLMAP_CPU:-0}" == 1 ]]; then
+  echo "Verified system FFmpeg/FFprobe, CPU-only COLMAP (Ceres bundle adjustment, no CUDA), and OOOBrush ooo-v1.0.0 CLI."
+else
+  echo "Verified system FFmpeg/FFprobe, pinned bundled COLMAP 4.2.1 (Caspar + Ceres), and OOOBrush ooo-v1.0.0 CLI."
+fi

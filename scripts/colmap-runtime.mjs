@@ -11,6 +11,17 @@ export const runtimeLock = JSON.parse(fs.readFileSync(path.join(workspace, "engi
 export const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
 export const fileHash = file => sha256(fs.readFileSync(file));
 
+// macOS has always shipped a CPU-only runtime. OOOSPLAT_COLMAP_CPU=1 gives Linux
+// and Windows the same option so a COLMAP built without CUDA validates. The switch
+// only removes the CUDA requirement, so the pinned CUDA release keeps validating.
+export function cpuOnlyAllowed() {
+  return process.env.OOOSPLAT_COLMAP_CPU === "1";
+}
+
+export function cudaRequired(platform) {
+  return platform !== "macos" && !cpuOnlyAllowed();
+}
+
 export function isLockedColmapHelp(help) {
   const candidates = [runtimeLock.sourceCommit.toLowerCase(), runtimeLock.sourceCommit.slice(0, 7).toLowerCase()];
   return candidates.some(commit => {
@@ -77,12 +88,15 @@ function verifyReleaseMetadata(root, platform, covered, lock) {
     || info.colmapVersion !== lock.colmapVersion) throw new Error("COLMAP release identity mismatch");
   if (info.platform !== platform || info.architecture !== expected.architecture) throw new Error("Runtime platform/architecture mismatch");
   const features = info.features;
+  const cuda = features?.CUDA_ENABLED === true;
   if (!features || lock.disabledFeatures.some(feature => features[feature] !== false)
     || features.cpuSift !== true || features.ceresCpuBA !== true
     || features.offlineLoopDetection !== true || features.vocabTreeMatching !== true
-    || features.CUDA_ENABLED !== expected.cuda || features.CASPAR_ENABLED !== expected.caspar
+    || typeof features.CUDA_ENABLED !== "boolean"
+    || features.CASPAR_ENABLED !== (cuda && expected.caspar)
     || features.CASPAR_USE_DOUBLE !== false) throw new Error("COLMAP feature policy mismatch");
-  if (expected.cuda) {
+  if (cudaRequired(platform) && !cuda) throw new Error("COLMAP runtime has no CUDA support; set OOOSPLAT_COLMAP_CPU=1 to accept a CPU-only build");
+  if (cuda) {
     if (info.cudaRelease !== lock.cudaRelease || JSON.stringify(info.gpuArchitectures) !== JSON.stringify(lock.gpuArchitectures)) throw new Error("CUDA build lock mismatch");
   } else if (info.cudaRelease !== null || !Array.isArray(info.gpuArchitectures) || info.gpuArchitectures.length !== 0) {
     throw new Error("CPU-only runtime unexpectedly declares CUDA");
@@ -132,9 +146,10 @@ function verifyBuilderMetadata(root, platform) {
   if (info.platform !== platform) throw new Error("Runtime platform mismatch");
   const features = info.colmapFeatures;
   if (!features || buildLock.disabledFeatures.some(feature => features[feature] !== false)
-    || features.CASPAR !== (platform !== "macos") || features.CUDA !== (platform !== "macos")
+    || typeof features.CUDA !== "boolean" || features.CASPAR !== features.CUDA
     || features.CERES !== true || features.CASPAR_USE_DOUBLE !== false) throw new Error("COLMAP feature policy mismatch");
-  if (platform !== "macos") {
+  if (cudaRequired(platform) && !features.CUDA) throw new Error("COLMAP build has no CUDA support; set OOOSPLAT_COLMAP_CPU=1 to accept a CPU-only build");
+  if (features.CUDA) {
     if (info.cudaVersion !== buildLock.cudaVersion || JSON.stringify(info.cudaArchitectures) !== JSON.stringify(buildLock.cudaArchitectures)) throw new Error("CUDA build lock mismatch");
     const actual = info.cudaToolkit;
     if (!actual || actual.releaseVersion !== buildLock.cudaVersion) throw new Error("Missing actual CUDA toolkit identity");
@@ -147,7 +162,11 @@ function verifyBuilderMetadata(root, platform) {
 }
 
 export function verifyColmap(root, platform, pin, { run = true, requireRelease = false, releaseLock = runtimeLock } = {}) {
-  const covered = verifyIntegrity(root, pin);
+  // A locally built CPU-only runtime has no published archive to pin against, so
+  // its own SHA256SUMS becomes the pin; the inventory still has to cover everything.
+  const integrityPin = pin || (cpuOnlyAllowed() ? fileHash(path.join(root, "SHA256SUMS")) : undefined);
+  if (!integrityPin) throw new Error("Runtime integrity pin is required");
+  const covered = verifyIntegrity(root, integrityPin);
   const info = JSON.parse(fs.readFileSync(path.join(root, "BUILD-INFO.json"), "utf8"));
   const published = info.repository === releaseLock.repository && Object.hasOwn(info, "runtimeRevision");
   if (requireRelease && !published) throw new Error("COLMAP runtime is not the locked fork Release");
@@ -157,6 +176,9 @@ export function verifyColmap(root, platform, pin, { run = true, requireRelease =
   const binary = path.join(root, "bin", platform === "windows" ? "colmap.exe" : "colmap");
   if (!covered.has(`bin/${path.basename(binary)}`)) throw new Error("COLMAP executable is not hash locked");
   if (!run) return;
+  const capabilities = info.features ?? info.colmapFeatures;
+  const declaredCuda = (capabilities?.CUDA_ENABLED ?? capabilities?.CUDA) === true;
+  const declaredCaspar = (capabilities?.CASPAR_ENABLED ?? capabilities?.CASPAR) === true;
   const environment = { ...process.env, PATH: platform === "windows" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32") : "/usr/bin:/bin:/usr/sbin:/sbin" };
   delete environment.LD_LIBRARY_PATH;
   delete environment.DYLD_LIBRARY_PATH;
@@ -165,10 +187,10 @@ export function verifyColmap(root, platform, pin, { run = true, requireRelease =
     const result = spawnSync(binary, [command, "-h"], { encoding: "utf8", timeout: 15000, windowsHide: true, env: environment });
     const help = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
     if (result.error || result.status !== 0 || !isLockedColmapHelp(help)) throw new Error(`Wrong COLMAP executable or failed ${command}: ${result.error ?? help}`);
-    if (command === "bundle_adjuster" && help.includes("--BundleAdjustmentCaspar.gpu_index") !== (platform !== "macos")) throw new Error("Wrong compiled Caspar capability");
+    if (command === "bundle_adjuster" && help.includes("--BundleAdjustmentCaspar.gpu_index") !== declaredCaspar) throw new Error("Wrong compiled Caspar capability");
     if (command === "bundle_adjuster" && !help.includes("--BundleAdjustmentCeres.use_gpu")) throw new Error("Missing Ceres fallback capability");
     if (command === "feature_extractor" && !help.includes("--FeatureExtraction.use_gpu")) throw new Error("Missing modern SIFT CLI");
-    if (command === "feature_extractor" && /with cuda/i.test(help) !== (platform !== "macos")) throw new Error("Wrong compiled CUDA capability");
+    if (command === "feature_extractor" && /with cuda/i.test(help) !== declaredCuda) throw new Error("Wrong compiled CUDA capability");
     if (command === "mapper" && !["--Mapper.ba_local_backend", "--Mapper.ba_global_backend", "--Mapper.ba_gpu_index"].every(flag => help.includes(flag))) throw new Error("Missing mapper backend options");
   }
 }
