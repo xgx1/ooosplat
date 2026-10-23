@@ -147,6 +147,38 @@ Linux 上 wgpu 只有 Vulkan/GL 两个后端，DX12 不存在，无需额外开�
 `Compute backend: Device<Cube(Wgpu(WgpuDevice { kind: DefaultDevice, backend: Auto }))>`
 即自动挑选到了 Vulkan。
 
+## 源码 CPU 构建（2026-10-23 21:2x 完成）
+
+前置：`sudo pacman -S gcc-fortran`（`lapack-reference` 需要 gfortran）；**代理会让 vcpkg 下载失败**（`error: curl operation failed with error code 35`），构建前去掉代理环境变量，本机直连 GitHub 正常。
+
+```bash
+env -u http_proxy -u https_proxy -u all_proxy OOOSPLAT_COLMAP_CPU=1 OOOSPLAT_BUILD_JOBS=28 \
+  bash scripts/build-colmap-linux.sh
+OOOSPLAT_COLMAP_CPU=1 bash scripts/verify-engines-linux.sh
+```
+
+结果：`engines/linux/colmap/bin/colmap` 为本机源码构建（无 CUDA），
+
+```
+Verified system FFmpeg/FFprobe, CPU-only COLMAP (Ceres bundle adjustment, no CUDA), and OOOBrush ooo-v1.0.0 CLI.
+COLMAP 4.2.1 (Commit bd1fcf654d2dd8fefa1466999c190a246f83f4b9 on Unknown without GPU support, std hash maps)
+```
+
+用该二进制跑合成 24 视角稀疏重建：
+
+```
+Images: 19 / Points: 1675 / Observations: 6311 / Mean reprojection error: 0.201251px
+```
+
+### 期间修掉的三个 Arch 适配缺陷
+
+1. `scripts/collect-linux-runtime.mjs`
+   - `hostLibrary` 只按词首匹配，Arch 上 `ldd` 把解释器解析成绝对路径 `/lib64/ld-linux-x86-64.so.2`，导致拷贝 `/usr/lib64/ld-linux-x86-64.so.2` 报 `ENOENT`。改为同时按 basename 匹配，且**任何解析到 `/usr/` 的系统库（glibc、gcc 运行时 `libgfortran`/`libgomp`/`libmvec`）一律不打包**。
+2. `scripts/package-colmap-cpu-runtime.mjs`
+   - 只按构建 triplet 的 `*.list` 归属库文件；`libz-ng.so.2` 等来自别的 triplet 目录，归属失败。改为遍历 `vcpkg/info` 下**全部** `*.list`，构建 triplet 优先。
+   - CPU 视图内的 `verifyColmap()` 需要 `OOOSPLAT_COLMAP_CPU=1`，打包命令必须带该变量。
+3. 手工续跑打包时必须重设 `patchelf` 的 `$ORIGIN`：用单引号或先赋变量 `D='$ORIGIN'`，反斜杠转义会写成字面 `\$ORIGIN`，二进制随后找不到同目录 `.so`。
+
 ## 仍不支持
 
 - **稠密 MVS**：`patch_match_stereo`/`stereo_fusion` 需要 CUDA，且 `engines/colmap-build.json`

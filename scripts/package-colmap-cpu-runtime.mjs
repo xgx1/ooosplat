@@ -37,8 +37,13 @@ const owners = new Map();
 const components = new Map();
 const triplet = path.basename(installed);
 const infoRoot = path.join(path.dirname(installed), "vcpkg/info");
-for (const list of fs.readdirSync(infoRoot).filter(name => name.endsWith(`_${triplet}.list`))) {
-  const port = list.slice(0, -(`_${triplet}.list`.length));
+// Libraries may resolve from any triplet dir (OpenImageIO pulls zlib-ng from the
+// static x64-linux triplet), so attribute across every vcpkg list, preferring the
+// build triplet when a port exists in both.
+const listFiles = fs.readdirSync(infoRoot).filter(name => name.endsWith(".list"));
+listFiles.sort((a, b) => Number(b.endsWith(`_${triplet}.list`)) - Number(a.endsWith(`_${triplet}.list`)));
+for (const list of listFiles) {
+  const port = list.slice(0, list.lastIndexOf("_"));
   const copyright = path.join(installed, "share", port, "copyright");
   const component = { name: port, licenseFiles: [], runtimeFiles: [] };
   if (fs.existsSync(copyright)) {

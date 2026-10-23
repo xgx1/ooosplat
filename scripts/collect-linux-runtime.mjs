@@ -36,7 +36,9 @@ export function linuxLddDependency(line) {
 
 // Only ABI-stable Ubuntu base libraries and host-provided NVIDIA driver files
 // are external. This is not a generic /usr/lib exclusion.
-const hostLibrary = /^(?:ld-linux-x86-64|lib(?:c|m|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+))\.so(?:\.|$)|^(?:libcuda\.so|libnvidia-)/;
+// gfortran/quadmath come with the host gcc toolchain that built the CPU COLMAP
+// (lapack-reference needs them); they are not part of any vcpkg port.
+const hostLibrary = /^(?:ld-linux-x86-64|lib(?:c|m|pthread|dl|rt|resolv|util|gcc_s|stdc\+\+|gfortran|quadmath|gomp))\.so(?:\.|$)|^(?:libcuda\.so|libnvidia-)/;
 
 export function collectLinuxRuntime(stage, installed, cuda = installed, { execute = spawnSync } = {}) {
   [stage, installed, cuda] = [stage, installed, cuda].map(p => path.resolve(p));
@@ -52,7 +54,13 @@ export function collectLinuxRuntime(stage, installed, cuda = installed, { execut
     if (result.error || result.status !== 0 || /not found/.test(result.stdout ?? "")) throw new Error(`Unresolved dependency in ${file}: ${result.stdout} ${result.stderr} ${result.error?.message ?? ""}`);
     for (const line of (result.stdout ?? "").split("\n")) {
       const dependency = linuxLddDependency(line);
-      if (!dependency || hostLibrary.test(dependency.name)) continue;
+      // Arch resolves the ELF interpreter as an absolute path (/lib64/...), so match on the
+      // basename too; anything that resolves into the host /usr tree is a system library
+      // (glibc, gcc runtime) that must not be bundled with the runtime.
+      if (!dependency
+        || hostLibrary.test(dependency.name)
+        || hostLibrary.test(path.basename(dependency.name))
+        || path.resolve(dependency.source).startsWith("/usr/")) continue;
       const { name, source } = dependency, destination = path.join(stage, "lib", name);
       if (fs.existsSync(destination)) continue;
       fs.copyFileSync(source, destination);
